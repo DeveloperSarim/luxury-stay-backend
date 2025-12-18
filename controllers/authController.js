@@ -303,7 +303,18 @@ export const registerUser = async (req, res, next) => {
 export const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
-    const user = await User.findOne({ email });
+    
+    // Check both User and Guest models
+    let user = await User.findOne({ email: email.toLowerCase() });
+    let isGuest = false;
+    
+    if (!user) {
+      const guest = await Guest.findOne({ email: email.toLowerCase() });
+      if (guest) {
+        user = guest;
+        isGuest = true;
+      }
+    }
     
     // Don't reveal if user exists or not for security
     if (!user) {
@@ -316,16 +327,20 @@ export const forgotPassword = async (req, res, next) => {
     const resetTokenExpiry = new Date();
     resetTokenExpiry.setHours(resetTokenExpiry.getHours() + 1); // 1 hour expiry
     
-    // Save reset token to user
+    // Save reset token to user/guest
     user.resetToken = resetToken;
     user.resetTokenExpiry = resetTokenExpiry;
     await user.save();
     
+    // Get user email for email sending
+    const userEmail = isGuest ? user.email : user.email;
+    const userName = isGuest ? `${user.firstName} ${user.lastName}`.trim() : user.name;
+    
     // Send email with reset link
     try {
-      console.log('📧 Sending password reset email to:', user.email);
-      await sendPasswordResetEmail(user.email, resetToken);
-      console.log('✅ Email sent successfully to:', user.email);
+      console.log('📧 Sending password reset email to:', userEmail);
+      await sendPasswordResetEmail(userEmail, resetToken, userName);
+      console.log('✅ Email sent successfully to:', userEmail);
       
       // For development: also return the reset link in response (remove in production)
       const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${resetToken}`;
@@ -370,11 +385,23 @@ export const resetPassword = async (req, res, next) => {
       throw new Error('Token and password are required');
     }
     
-    // Find user with valid reset token
-    const user = await User.findOne({
+    // Find user with valid reset token - check both User and Guest models
+    let user = await User.findOne({
       resetToken: token,
       resetTokenExpiry: { $gt: new Date() }, // Token not expired
     });
+    
+    let isGuest = false;
+    if (!user) {
+      const guest = await Guest.findOne({
+        resetToken: token,
+        resetTokenExpiry: { $gt: new Date() }, // Token not expired
+      });
+      if (guest) {
+        user = guest;
+        isGuest = true;
+      }
+    }
     
     if (!user) {
       res.status(400);

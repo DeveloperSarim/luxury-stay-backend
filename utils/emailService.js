@@ -75,7 +75,7 @@ if (initialTransporter) {
   console.warn('⚠️  SMTP transporter not created. Check your .env file for SMTP configuration.');
 }
 
-export const sendPasswordResetEmail = async (email, resetToken) => {
+export const sendPasswordResetEmail = async (email, resetToken, userName = 'User') => {
   // Check if SMTP is configured
   if (!isSMTPConfigured()) {
     console.error('❌ SMTP Configuration Missing:');
@@ -118,7 +118,7 @@ export const sendPasswordResetEmail = async (email, resetToken) => {
           </div>
           <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 10px 10px;">
             <h2 style="color: #111827; margin-top: 0;">Password Reset Request</h2>
-            <p>Hello,</p>
+            <p>Hello ${userName || 'User'},</p>
             <p>We received a request to reset your password for your Luxury Stay account.</p>
             <p>Click the button below to reset your password:</p>
             <div style="text-align: center; margin: 30px 0;">

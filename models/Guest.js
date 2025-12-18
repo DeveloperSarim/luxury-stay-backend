@@ -12,6 +12,8 @@ const guestSchema = new mongoose.Schema(
       required: false, // Make optional - will be set when needed
       default: null
     },
+    resetToken: { type: String },
+    resetTokenExpiry: { type: Date },
     address: { type: String },
     preferences: { type: String },
     notes: { type: String },

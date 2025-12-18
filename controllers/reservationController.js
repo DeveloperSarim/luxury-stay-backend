@@ -4,6 +4,13 @@ import { Guest } from '../models/Guest.js';
 import { User } from '../models/User.js';
 import QRCode from 'qrcode';
 import nodemailer from 'nodemailer';
+import PDFDocument from 'pdfkit';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Public booking endpoint (no auth required)
 export const createPublicReservation = async (req, res, next) => {
@@ -334,13 +341,372 @@ export const createReservation = async (req, res, next) => {
       .populate('room')
       .populate('guest');
     
+    // Generate QR code for email
+    let qrCodeImage = '';
+    const qrData = JSON.stringify({
+      reservationId: reservation._id.toString(),
+      guestId: guest._id.toString(),
+      roomNumber: room.roomNumber,
+      checkInDate: checkInDate,
+      checkOutDate: checkOutDate
+    });
+    
+    try {
+      qrCodeImage = await QRCode.toDataURL(qrData, {
+        errorCorrectionLevel: 'M',
+        type: 'image/png',
+        quality: 0.92,
+        margin: 1,
+        width: 250
+      });
+      
+      // Save QR code to reservation
+      reservation.qrCode = qrCodeImage;
+      reservation.qrCodeData = qrData;
+      await reservation.save();
+    } catch (qrError) {
+      console.error('QR code generation failed:', qrError);
+    }
+    
+    // Send email with digital card PDF (non-blocking)
+    try {
+      const bookingData = {
+        firstName: guest.firstName,
+        lastName: guest.lastName,
+        email: guest.email,
+        phone: guest.phone || '',
+        reservationId: reservation._id.toString(),
+        roomNumber: room.roomNumber,
+        roomType: room.type,
+        checkInDate: checkInDate,
+        checkOutDate: checkOutDate,
+        numGuests: numGuests || 1,
+        totalAmount: 0, // Calculate if needed
+        qrCodeImage: qrCodeImage
+      };
+      
+      // Generate and send digital card PDF via email
+      await sendBookingConfirmationEmailWithPDF(userEmail, bookingData, reservation._id.toString(), qrCodeImage, guest, room, checkInDate, checkOutDate);
+    } catch (emailError) {
+      console.error('Failed to send booking confirmation email:', emailError.message);
+      // Don't fail the booking if email fails
+    }
+    
     res.status(201).json(populatedReservation);
   } catch (err) {
     next(err);
   }
 };
 
-// Email sending function
+// Generate digital card PDF
+const generateDigitalCardPDF = async (reservationId, qrCodeDataUrl, guest, room, checkInDate, checkOutDate) => {
+  return new Promise((resolve, reject) => {
+    try {
+      const tempDir = path.join(__dirname, '../temp');
+      
+      // Create temp directory if it doesn't exist
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+      
+      const pdfPath = path.join(tempDir, `digital-card-${reservationId}.pdf`);
+      const doc = new PDFDocument({
+        size: [800, 500],
+        layout: 'landscape',
+        margin: 0
+      });
+      
+      const stream = fs.createWriteStream(pdfPath);
+      doc.pipe(stream);
+      
+      // Purple gradient background (simulated with rectangle)
+      doc.rect(0, 0, 800, 500)
+         .fillColor('#564ade')
+         .fill();
+      
+      // White card
+      doc.roundedRect(40, 40, 720, 420, 24)
+         .fillColor('#ffffff')
+         .fill()
+         .strokeColor('#e5e7eb')
+         .lineWidth(2)
+         .stroke();
+      
+      // Title
+      doc.fontSize(36)
+         .fillColor('#564ade')
+         .font('Helvetica-Bold')
+         .text('Virtual Booking Card', 400, 100, {
+           align: 'center',
+           width: 720
+         });
+      
+      // QR Code (center)
+      if (qrCodeDataUrl) {
+        const qrBase64 = qrCodeDataUrl.split(',')[1];
+        const qrBuffer = Buffer.from(qrBase64, 'base64');
+        doc.image(qrBuffer, 275, 150, {
+          width: 250,
+          height: 250,
+          fit: [250, 250]
+        });
+      }
+      
+      // Booking Details - Left Side
+      doc.fontSize(16)
+         .fillColor('#6b7280')
+         .font('Helvetica-Bold')
+         .text('Name', 80, 150);
+      
+      doc.fontSize(18)
+         .fillColor('#111827')
+         .font('Helvetica')
+         .text(`${guest.firstName} ${guest.lastName}`.trim(), 80, 175);
+      
+      doc.fontSize(16)
+         .fillColor('#6b7280')
+         .font('Helvetica-Bold')
+         .text('Email', 80, 220);
+      
+      doc.fontSize(18)
+         .fillColor('#111827')
+         .font('Helvetica')
+         .text(guest.email || 'N/A', 80, 245);
+      
+      doc.fontSize(16)
+         .fillColor('#6b7280')
+         .font('Helvetica-Bold')
+         .text('Phone', 80, 290);
+      
+      doc.fontSize(18)
+         .fillColor('#111827')
+         .font('Helvetica')
+         .text(guest.phone || 'N/A', 80, 315);
+      
+      doc.fontSize(16)
+         .fillColor('#6b7280')
+         .font('Helvetica-Bold')
+         .text('Room', 80, 360);
+      
+      doc.fontSize(18)
+         .fillColor('#111827')
+         .font('Helvetica')
+         .text(`Room ${room.roomNumber}`, 80, 385);
+      
+      // Booking Details - Right Side
+      doc.fontSize(16)
+         .fillColor('#6b7280')
+         .font('Helvetica-Bold')
+         .text('Check-in', 600, 360);
+      
+      doc.fontSize(18)
+         .fillColor('#111827')
+         .font('Helvetica')
+         .text(new Date(checkInDate).toLocaleDateString('en-GB'), 600, 385);
+      
+      doc.fontSize(16)
+         .fillColor('#6b7280')
+         .font('Helvetica-Bold')
+         .text('Check-out', 600, 420);
+      
+      doc.fontSize(18)
+         .fillColor('#111827')
+         .font('Helvetica')
+         .text(new Date(checkOutDate).toLocaleDateString('en-GB'), 600, 445);
+      
+      doc.end();
+      
+      stream.on('finish', () => {
+        resolve(pdfPath);
+      });
+      
+      stream.on('error', (err) => {
+        reject(err);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+};
+
+// Send booking confirmation email with PDF attachment
+const sendBookingConfirmationEmailWithPDF = async (email, bookingData, reservationId, qrCodeImage, guest, room, checkInDate, checkOutDate) => {
+  // Skip email if SMTP credentials are not configured
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.log('SMTP credentials not configured, skipping email');
+    return;
+  }
+
+  if (!nodemailer) {
+    console.warn('Nodemailer not available, skipping email');
+    return;
+  }
+
+  let transporter;
+  try {
+    transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.SMTP_PORT) || 587,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+  } catch (transporterError) {
+    console.error('Failed to create email transporter:', transporterError.message);
+    return;
+  }
+
+  // Generate digital card PDF
+  let pdfPath = null;
+  try {
+    pdfPath = await generateDigitalCardPDF(reservationId, qrCodeImage, guest, room, checkInDate, checkOutDate);
+    console.log('✅ Digital card PDF generated:', pdfPath);
+  } catch (pdfError) {
+    console.error('Failed to generate PDF:', pdfError.message);
+    // Continue without PDF attachment
+  }
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #564ade 0%, #7c3aed 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+        .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; }
+        .qr-code { text-align: center; margin: 20px 0; }
+        .qr-code img { max-width: 300px; border: 5px solid #564ade; border-radius: 10px; padding: 10px; background: white; }
+        .info-box { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #564ade; }
+        .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #e5e7eb; }
+        .info-row:last-child { border-bottom: none; }
+        .label { font-weight: 600; color: #666; }
+        .value { color: #111827; }
+        .footer { text-align: center; margin-top: 30px; color: #666; font-size: 12px; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h1>Booking Confirmed! 🎉</h1>
+          <p>Your reservation has been successfully created</p>
+        </div>
+        <div class="content">
+          <p>Dear ${bookingData.firstName} ${bookingData.lastName},</p>
+          <p>Thank you for choosing Luxury Stay! Your booking has been confirmed.</p>
+          
+          <div class="info-box">
+            <h3>Booking Details</h3>
+            <div class="info-row">
+              <span class="label">Reservation ID:</span>
+              <span class="value">${bookingData.reservationId}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Room:</span>
+              <span class="value">Room ${bookingData.roomNumber} - ${bookingData.roomType}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Check-in:</span>
+              <span class="value">${new Date(bookingData.checkInDate).toLocaleDateString()}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Check-out:</span>
+              <span class="value">${new Date(bookingData.checkOutDate).toLocaleDateString()}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Guests:</span>
+              <span class="value">${bookingData.numGuests}</span>
+            </div>
+          </div>
+
+          <div class="qr-code">
+            <h3>Your Digital Booking Card</h3>
+            <p>Your digital booking card with QR code is attached to this email as PDF.</p>
+            ${qrCodeImage ? `<img src="${qrCodeImage}" alt="QR Code" />` : ''}
+          </div>
+
+          <div class="info-box">
+            <h3>Important Instructions</h3>
+            <ul>
+              <li>Please check the attached PDF for your digital booking card</li>
+              <li>Present the QR code at reception for check-in</li>
+              <li>Keep this email and PDF accessible during your stay</li>
+              <li>For any queries, contact us at help@luxurystay.com</li>
+            </ul>
+          </div>
+
+          <div class="footer">
+            <p>Luxury Stay Hotel Management System</p>
+            <p>953 5th Avenue, New York, NY 10021</p>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  try {
+    const mailOptions = {
+      from: `"Luxury Stay" <${process.env.SMTP_USER}>`,
+      to: email,
+      subject: 'Booking Confirmed - Luxury Stay',
+      html: htmlContent,
+      attachments: []
+    };
+
+    // Add PDF attachment if generated
+    if (pdfPath && fs.existsSync(pdfPath)) {
+      mailOptions.attachments.push({
+        filename: `digital-card-${reservationId}.pdf`,
+        path: pdfPath,
+        contentType: 'application/pdf'
+      });
+    }
+
+    // Add QR code image attachment if available
+    if (qrCodeImage && qrCodeImage.includes(',')) {
+      try {
+        mailOptions.attachments.push({
+          filename: 'qr-code.png',
+          content: qrCodeImage.split(',')[1],
+          encoding: 'base64'
+        });
+      } catch (attachError) {
+        console.warn('Failed to attach QR code to email:', attachError.message);
+      }
+    }
+
+    await transporter.sendMail(mailOptions);
+    console.log('✅ Booking confirmation email with PDF sent to:', email);
+    
+    // Clean up PDF file after sending
+    if (pdfPath && fs.existsSync(pdfPath)) {
+      setTimeout(() => {
+        try {
+          fs.unlinkSync(pdfPath);
+          console.log('✅ Temporary PDF file deleted:', pdfPath);
+        } catch (deleteError) {
+          console.warn('Failed to delete temporary PDF:', deleteError.message);
+        }
+      }, 5000); // Delete after 5 seconds
+    }
+  } catch (mailError) {
+    console.error('Failed to send email:', mailError.message);
+    // Clean up PDF file even if email fails
+    if (pdfPath && fs.existsSync(pdfPath)) {
+      try {
+        fs.unlinkSync(pdfPath);
+      } catch (deleteError) {
+        console.warn('Failed to delete temporary PDF:', deleteError.message);
+      }
+    }
+    throw mailError;
+  }
+};
+
+// Email sending function (old - kept for backward compatibility)
 const sendBookingConfirmationEmail = async (email, bookingData) => {
   // Skip email if SMTP credentials are not configured
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
