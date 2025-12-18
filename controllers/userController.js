@@ -43,18 +43,16 @@ export const updateStaff = async (req, res, next) => {
   }
 };
 
-export const deactivateStaff = async (req, res, next) => {
+export const deleteStaff = async (req, res, next) => {
   try {
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { isActive: false },
-      { new: true }
-    ).select('-password');
+    // Directly delete the user from database
+    const user = await User.findByIdAndDelete(req.params.id);
     if (!user) {
       res.status(404);
       throw new Error('User not found');
     }
-    res.json(user);
+    console.log(`User ${user._id} permanently deleted from database`);
+    res.json({ message: 'Staff member deleted successfully' });
   } catch (err) {
     next(err);
   }

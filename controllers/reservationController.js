@@ -239,9 +239,29 @@ export const createReservation = async (req, res, next) => {
   try {
     const { room: roomId, checkInDate, checkOutDate, numGuests, notes } = req.body;
     const userId = req.user.id;
-    const user = await User.findById(userId);
+    
+    // Try User model first, then Guest model
+    let user = await User.findById(userId);
+    let isGuest = false;
+    let userEmail = null;
+    let userName = null;
+    let userPhone = null;
     
     if (!user) {
+      const guest = await Guest.findById(userId);
+      if (guest) {
+        isGuest = true;
+        userEmail = guest.email;
+        userName = `${guest.firstName} ${guest.lastName}`.trim();
+        userPhone = guest.phone || '';
+      }
+    } else {
+      userEmail = user.email;
+      userName = user.name;
+      userPhone = user.phone || '';
+    }
+    
+    if (!userEmail) {
       res.status(404);
       throw new Error('User not found');
     }
@@ -272,25 +292,25 @@ export const createReservation = async (req, res, next) => {
       throw new Error('Room is already booked for the selected dates');
     }
     
-    // Find or create guest for user
-    let guest = await Guest.findOne({ email: user.email.toLowerCase() });
+    // Find or create guest
+    let guest = await Guest.findOne({ email: userEmail.toLowerCase() });
     if (!guest) {
       // Create guest from user info
-      // Password not required since user is already authenticated via User model
-      // Guest password is only needed for guest login, not for authenticated users
+      const nameParts = userName.split(' ');
       guest = await Guest.create({
-        firstName: user.name.split(' ')[0] || user.name,
-        lastName: user.name.split(' ').slice(1).join(' ') || '',
-        email: user.email.toLowerCase(),
-        phone: user.phone || '', // Use user phone if available
+        firstName: nameParts[0] || userName,
+        lastName: nameParts.slice(1).join(' ') || '',
+        email: userEmail.toLowerCase(),
+        phone: userPhone || '',
         // password is optional - not required for authenticated users
       });
     } else {
       // Update guest info if exists
-      guest.firstName = user.name.split(' ')[0] || user.name;
-      guest.lastName = user.name.split(' ').slice(1).join(' ') || '';
-      if (user.phone) {
-        guest.phone = user.phone;
+      const nameParts = userName.split(' ');
+      guest.firstName = nameParts[0] || userName;
+      guest.lastName = nameParts.slice(1).join(' ') || '';
+      if (userPhone) {
+        guest.phone = userPhone;
       }
       await guest.save();
     }
@@ -489,15 +509,27 @@ export const downloadQRCode = async (req, res, next) => {
     }
     
     // Check if user owns this reservation
-    const user = await User.findById(userId);
-    if (!user) {
+    // Try User model first, then Guest model
+    let user = await User.findById(userId);
+    let userEmail = null;
+    
+    if (user) {
+      userEmail = user.email;
+    } else {
+      const guestUser = await Guest.findById(userId);
+      if (guestUser) {
+        userEmail = guestUser.email;
+      }
+    }
+    
+    if (!userEmail) {
       res.status(404);
       throw new Error('User not found');
     }
     
     // Verify ownership - check if guest email matches user email
     const guest = await Guest.findById(reservation.guest._id || reservation.guest);
-    if (guest.email.toLowerCase() !== user.email.toLowerCase()) {
+    if (!guest || guest.email.toLowerCase() !== userEmail.toLowerCase()) {
       res.status(403);
       throw new Error('Unauthorized: This reservation does not belong to you');
     }
@@ -646,17 +678,27 @@ export const checkOut = async (req, res, next) => {
 // Get user's own bookings
 export const getMyBookings = async (req, res, next) => {
   try {
-    const userId = req.user.id;
-    const user = await User.findById(userId);
-    if (!user) {
-      res.status(404);
-      throw new Error('User not found');
+    const userId = req.user.id || req.user._id;
+    
+    if (!userId) {
+      res.status(400);
+      throw new Error('User ID not found in request');
     }
     
-    // Find guest by user email
-    const guest = await Guest.findOne({ email: user.email.toLowerCase() });
+    // Try User model first, then Guest model
+    let user = await User.findById(userId);
+    let guest = null;
+    
+    if (user) {
+      // Find guest by user email
+      guest = await Guest.findOne({ email: user.email.toLowerCase() });
+    } else {
+      // If not found in User, try Guest model (for guest login)
+      guest = await Guest.findById(userId);
+    }
+    
     if (!guest) {
-      // No guest found means no bookings
+      // No guest found means no bookings - return empty array instead of error
       return res.json([]);
     }
     
@@ -668,6 +710,7 @@ export const getMyBookings = async (req, res, next) => {
     
     res.json(reservations);
   } catch (err) {
+    console.error('getMyBookings error:', err);
     next(err);
   }
 };
@@ -686,8 +729,25 @@ export const cancelBooking = async (req, res, next) => {
     
     // Check if user owns this booking
     const userId = req.user.id;
-    const user = await User.findById(userId);
-    if (user.role !== 'admin' && reservation.guest.email !== user.email) {
+    // Try User model first, then Guest model
+    let user = await User.findById(userId);
+    let userEmail = null;
+    
+    if (user) {
+      userEmail = user.email;
+    } else {
+      const guest = await Guest.findById(userId);
+      if (guest) {
+        userEmail = guest.email;
+      }
+    }
+    
+    if (!userEmail) {
+      res.status(404);
+      throw new Error('User not found');
+    }
+    
+    if (req.user.role !== 'admin' && req.user.role !== 'manager' && reservation.guest.email !== userEmail.toLowerCase()) {
       res.status(403);
       throw new Error('Not authorized to cancel this booking');
     }
