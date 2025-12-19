@@ -244,33 +244,69 @@ export const createPublicReservation = async (req, res, next) => {
 
 export const createReservation = async (req, res, next) => {
   try {
-    const { room: roomId, checkInDate, checkOutDate, numGuests, notes } = req.body;
-    const userId = req.user.id;
+    const { room: roomId, checkInDate, checkOutDate, numGuests, notes, guest: guestId } = req.body;
     
-    // Try User model first, then Guest model
-    let user = await User.findById(userId);
-    let isGuest = false;
-    let userEmail = null;
-    let userName = null;
-    let userPhone = null;
+    let guest = null;
     
-    if (!user) {
-      const guest = await Guest.findById(userId);
-      if (guest) {
-        isGuest = true;
-        userEmail = guest.email;
-        userName = `${guest.firstName} ${guest.lastName}`.trim();
-        userPhone = guest.phone || '';
+    // If guest ID is provided (from reception dashboard), use it directly
+    if (guestId) {
+      guest = await Guest.findById(guestId);
+      if (!guest) {
+        res.status(404);
+        throw new Error('Guest not found');
       }
     } else {
-      userEmail = user.email;
-      userName = user.name;
-      userPhone = user.phone || '';
-    }
-    
-    if (!userEmail) {
-      res.status(404);
-      throw new Error('User not found');
+      // Otherwise, use logged-in user (for regular users)
+      const userId = req.user.id;
+      
+      // Try User model first, then Guest model
+      let user = await User.findById(userId);
+      let isGuest = false;
+      let userEmail = null;
+      let userName = null;
+      let userPhone = null;
+      
+      if (!user) {
+        const guestUser = await Guest.findById(userId);
+        if (guestUser) {
+          isGuest = true;
+          userEmail = guestUser.email;
+          userName = `${guestUser.firstName} ${guestUser.lastName || ''}`.trim();
+          userPhone = guestUser.phone || '';
+        }
+      } else {
+        userEmail = user.email;
+        userName = user.name;
+        userPhone = user.phone || '';
+      }
+      
+      if (!userEmail) {
+        res.status(404);
+        throw new Error('User not found');
+      }
+      
+      // Find or create guest
+      guest = await Guest.findOne({ email: userEmail.toLowerCase() });
+      if (!guest) {
+        // Create guest from user info
+        const nameParts = userName.split(' ');
+        guest = await Guest.create({
+          firstName: nameParts[0] || userName,
+          lastName: nameParts.slice(1).join(' ') || '',
+          email: userEmail.toLowerCase(),
+          phone: userPhone || '',
+          // password is optional - not required for authenticated users
+        });
+      } else {
+        // Update guest info if exists
+        const nameParts = userName.split(' ');
+        guest.firstName = nameParts[0] || userName;
+        guest.lastName = nameParts.slice(1).join(' ') || '';
+        if (userPhone) {
+          guest.phone = userPhone;
+        }
+        await guest.save();
+      }
     }
     
     const room = await Room.findById(roomId);
@@ -297,29 +333,6 @@ export const createReservation = async (req, res, next) => {
     if (conflictingReservations.length > 0) {
       res.status(400);
       throw new Error('Room is already booked for the selected dates');
-    }
-    
-    // Find or create guest
-    let guest = await Guest.findOne({ email: userEmail.toLowerCase() });
-    if (!guest) {
-      // Create guest from user info
-      const nameParts = userName.split(' ');
-      guest = await Guest.create({
-        firstName: nameParts[0] || userName,
-        lastName: nameParts.slice(1).join(' ') || '',
-        email: userEmail.toLowerCase(),
-        phone: userPhone || '',
-        // password is optional - not required for authenticated users
-      });
-    } else {
-      // Update guest info if exists
-      const nameParts = userName.split(' ');
-      guest.firstName = nameParts[0] || userName;
-      guest.lastName = nameParts.slice(1).join(' ') || '';
-      if (userPhone) {
-        guest.phone = userPhone;
-      }
-      await guest.save();
     }
     
     // Create reservation
@@ -370,23 +383,28 @@ export const createReservation = async (req, res, next) => {
     
     // Send email with digital card PDF (non-blocking)
     try {
-      const bookingData = {
-        firstName: guest.firstName,
-        lastName: guest.lastName,
-        email: guest.email,
-        phone: guest.phone || '',
-        reservationId: reservation._id.toString(),
-        roomNumber: room.roomNumber,
-        roomType: room.type,
-        checkInDate: checkInDate,
-        checkOutDate: checkOutDate,
-        numGuests: numGuests || 1,
-        totalAmount: 0, // Calculate if needed
-        qrCodeImage: qrCodeImage
-      };
-      
-      // Generate and send digital card PDF via email
-      await sendBookingConfirmationEmailWithPDF(userEmail, bookingData, reservation._id.toString(), qrCodeImage, guest, room, checkInDate, checkOutDate);
+      const guestEmail = guest.email;
+      if (guestEmail && nodemailer && process.env.SMTP_USER) {
+        const bookingData = {
+          firstName: guest.firstName,
+          lastName: guest.lastName || '',
+          email: guestEmail,
+          phone: guest.phone || '',
+          reservationId: reservation._id.toString(),
+          roomNumber: room.roomNumber,
+          roomType: room.type,
+          checkInDate: checkInDate,
+          checkOutDate: checkOutDate,
+          numGuests: numGuests || 1,
+          totalAmount: 0, // Calculate if needed
+          qrCodeImage: qrCodeImage
+        };
+        
+        // Generate and send digital card PDF via email
+        await sendBookingConfirmationEmailWithPDF(guestEmail, bookingData, reservation._id.toString(), qrCodeImage, guest, room, checkInDate, checkOutDate);
+      } else {
+        console.log('Email not sent - guest email not available or SMTP not configured');
+      }
     } catch (emailError) {
       console.error('Failed to send booking confirmation email:', emailError.message);
       // Don't fail the booking if email fails
@@ -893,11 +911,17 @@ export const downloadQRCode = async (req, res, next) => {
       throw new Error('User not found');
     }
     
-    // Verify ownership - check if guest email matches user email
-    const guest = await Guest.findById(reservation.guest._id || reservation.guest);
-    if (!guest || guest.email.toLowerCase() !== userEmail.toLowerCase()) {
-      res.status(403);
-      throw new Error('Unauthorized: This reservation does not belong to you');
+    // Check if user is admin, manager, or receptionist - they can access all reservations
+    const userRole = req.user.role;
+    const isStaff = ['admin', 'manager', 'receptionist'].includes(userRole);
+    
+    // Verify ownership only if user is not staff
+    if (!isStaff) {
+      const guest = await Guest.findById(reservation.guest._id || reservation.guest);
+      if (!guest || guest.email.toLowerCase() !== userEmail.toLowerCase()) {
+        res.status(403);
+        throw new Error('Unauthorized: This reservation does not belong to you');
+      }
     }
     
     // Generate QR code data with required fields

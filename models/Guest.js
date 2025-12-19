@@ -4,7 +4,7 @@ import bcrypt from 'bcrypt';
 const guestSchema = new mongoose.Schema(
   {
     firstName: { type: String, required: true },
-    lastName: { type: String, required: true },
+    lastName: { type: String, required: false, default: '' },
     email: { type: String, lowercase: true },
     phone: { type: String },
     password: { 
