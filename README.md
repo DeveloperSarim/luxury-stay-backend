@@ -32,9 +32,16 @@ Hotel Management System Backend API built with Node.js, Express, and MongoDB.
 npm install
 ```
 
-2. Create `.env` file:
+2. Create your `.env` from the template:
+
+```bash
+cp .env.example .env
+```
+
+Then fill in the values:
 ```env
 PORT=5000
+NODE_ENV=development
 MONGO_URI=your_mongodb_connection_string
 JWT_SECRET=your_jwt_secret
 SMTP_HOST=smtp.gmail.com
@@ -43,6 +50,10 @@ SMTP_USER=your_email@gmail.com
 SMTP_PASS=your_app_password
 FRONTEND_URL=http://localhost:5173
 ```
+
+> Set `NODE_ENV=production` when you deploy. The error handler only strips
+> stack traces from API responses when it is set, so leaving it unset exposes
+> internal paths and stack frames to every client that triggers an error.
 
 3. Start server:
 ```bash
